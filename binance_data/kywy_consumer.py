@@ -73,17 +73,25 @@ class KywyConsumer:
             logger.debug('Empty queue')
             return
 
-        logger.info('Processing {} elements'.format(len(records)))
-        arrow_table = self._build_arrow_tables(records)
-        loader = self._kawa.new_arrow_data_loader(
-            datasource_name=self._datasource_name,
-            arrow_table=arrow_table
-        )
-        loader.load_data(
-            reset_before_insert=False,
-            create_sheet=False,
-            optimize_after_insert=False
-        )
+        for i in range(1, 30):
+            logger.info('(ITERATION {})Processing {} elements'.format(i, len(records)))
+            try:
+                arrow_table = self._build_arrow_tables(records)
+                loader = self._kawa.new_arrow_data_loader(
+                    datasource_name=self._datasource_name,
+                    arrow_table=arrow_table
+                )
+                loader.load_data(
+                    reset_before_insert=False,
+                    create_sheet=False,
+                    optimize_after_insert=False
+                )
+                return
+            except Exception as e:
+                logger.error("Impossible to send data to KAWA:", e)
+                retry_in = i * 5
+                logger.info(f"Will retry in {retry_in} seconds")
+                time.sleep(retry_in)
 
     def _remove_old_partitions(self):
         cutoff_date = (datetime.today() - timedelta(days=RETENTION_IN_DAYS)).date()
