@@ -1,8 +1,8 @@
 import threading
 import os
 from binance.client import Client
-from binance_data.binance_websocket import BinanceWebSocketClient
-from binance_data.kywy_consumer import KywyConsumer
+from binance_websocket import BinanceWebSocketClient
+from kywy_consumer import KywyConsumer
 from dotenv import load_dotenv
 from logging_config import get_logger
 

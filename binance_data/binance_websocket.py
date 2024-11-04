@@ -3,6 +3,7 @@ import websocket
 import json
 import time
 import threading
+import ssl
 
 from datetime import datetime
 from logging_config import get_logger
@@ -43,6 +44,7 @@ class BinanceWebSocketClient:
                 self._ws.run_forever(
                     ping_interval=10,
                     ping_timeout=5,
+                    sslopt={"cert_reqs": ssl.CERT_NONE},
                 )
             except Exception as e:
                 logger.error("Connection error:", e)
