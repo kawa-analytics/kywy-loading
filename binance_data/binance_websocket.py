@@ -66,7 +66,7 @@ class BinanceWebSocketClient:
             if symbol['quoteAsset'] == 'USDT' and symbol['contractType'] == 'PERPETUAL':
                 symbols.append(symbol['symbol'])
         logger.info('{} Symbols were found'.format(len(symbols)))
-        return symbols[:400]
+        return symbols[:420]
 
     def _init_websocket(self):
         logger.info('Initializing the websocket')
