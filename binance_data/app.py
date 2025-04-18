@@ -16,3 +16,4 @@ consumer = KywyConsumer(data_queue=ws.queue(), datasource_name='binance')
 
 consumer.start()
 ws.start()
+

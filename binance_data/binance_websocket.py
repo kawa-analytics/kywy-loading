@@ -22,7 +22,7 @@ class BinanceWebSocketClient:
         self._ws = None
 
     def start(self):
-
+        # Connect - and automatic close and reconnect loop
         while True:
             self._init_websocket()
             websocket_thread = threading.Thread(
@@ -66,7 +66,7 @@ class BinanceWebSocketClient:
             if symbol['quoteAsset'] == 'USDT' and symbol['contractType'] == 'PERPETUAL':
                 symbols.append(symbol['symbol'])
         logger.info('{} Symbols were found'.format(len(symbols)))
-        return symbols
+        return symbols[:400]
 
     def _init_websocket(self):
         logger.info('Initializing the websocket')
