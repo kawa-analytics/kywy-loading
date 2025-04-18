@@ -9,7 +9,7 @@ from logging_config import get_logger
 
 logger = get_logger(__name__)
 
-RETENTION_IN_DAYS = 10
+RETENTION_IN_DAYS = 3
 DELAY_BETWEEN_TWO_ITERATIONS = 5
 
 
