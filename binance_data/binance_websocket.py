@@ -71,6 +71,7 @@ class BinanceWebSocketClient:
     def _init_websocket(self):
         logger.info('Initializing the websocket')
         symbols = self._load_symbols()
+        logger.info(f'There are {len(symbols)} symbols to load')
         streams = '/'.join([f'{s.lower()}_perpetual@continuousKline_1m' for s in symbols])
         ws_url = f'wss://fstream.binance.com/ws/{streams}'
         logger.debug(f'Here is the WS url: {ws_url}')
