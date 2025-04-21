@@ -12,6 +12,52 @@ logger = get_logger(__name__)
 
 AUTOMATICALLY_RECONNECTS_EVERY_S = 60 * 60
 
+SYMBOL_BLACKLIST = [
+    "AGIXUSDT",
+    "AMBUSDT",
+    "BADGERUSDT",
+    "BALUSDT",
+    "BLZUSDT",
+    "BNXUSDT",
+    "BONDUSDT",
+    "COMBOUSDT",
+    "CTKUSDT",
+    "CVCUSDT",
+    "CVXUSDT",
+    "DARUSDT",
+    "DGBUSDT",
+    "FTMUSDT",
+    "FTTUSDT",
+    "GLMRUSDT",
+    "IDEXUSDT",
+    "KEYUSDT",
+    "KLAYUSDT",
+    "LINAUSDT",
+    "LITUSDT",
+    "LOOMUSDT",
+    "MDTUSDT",
+    "NULSUSDT",
+    "OCEANUSDT",
+    "OMGUSDT",
+    "ORBSUSDT",
+    "RADUSDT",
+    "RAYUSDT",
+    "REEFUSDT",
+    "RENUSDT",
+    "SCUSDT",
+    "SLPUSDT",
+    "SNTUSDT",
+    "STMXUSDT",
+    "STPTUSDT",
+    "STRAXUSDT",
+    "TROYUSDT",
+    "UNFIUSDT",
+    "VIDTUSDT",
+    "WAVESUSDT",
+    "XEMUSDT",
+    "USDCUSDT",
+]
+
 
 class BinanceWebSocketClient:
 
@@ -63,7 +109,7 @@ class BinanceWebSocketClient:
         exchange_info = self._binance_client.futures_exchange_info()
         symbols = []
         for symbol in exchange_info.get('symbols'):
-            if symbol['quoteAsset'] == 'USDT' and symbol['contractType'] == 'PERPETUAL':
+            if symbol['quoteAsset'] == 'USDT' and symbol['contractType'] == 'PERPETUAL' and symbol['symbol'] not in SYMBOL_BLACKLIST:
                 symbols.append(symbol['symbol'])
         logger.info('{} Symbols were found'.format(len(symbols)))
         return symbols[:400]
