@@ -11,6 +11,7 @@ logger = get_logger(__name__)
 
 RETENTION_IN_DAYS = 7
 DELAY_BETWEEN_TWO_ITERATIONS = 5
+DELAY_BETWEEN_CLEANINGS = 20 * 60
 
 
 class KywyConsumer:
@@ -22,30 +23,34 @@ class KywyConsumer:
         self._datasource_name = datasource_name
         self._datasource_id = None
         self._kawa = K.load_client_from_environment()
-        self.main_event_loop_iter = 0
 
     def start(self):
+        self._init_datasource()
         consumer_thread = threading.Thread(
             target=self.run,
             name="kawa_appender",
             daemon=True
         )
         consumer_thread.start()
+        cleaning_thread = threading.Thread(
+            target=self.clean,
+            name="kawa_cleaner",
+            daemon=True
+        )
+        cleaning_thread.start()
 
     def run(self):
-        self._init_datasource()
-        logger.info('Starting the consumer')
-
-        # Main event loop
+        logger.info('Starting the consumer thread')
         while True:
             time.sleep(DELAY_BETWEEN_TWO_ITERATIONS)
             logger.debug('Will process the queue')
             self._process_queue()
 
-            if self.main_event_loop_iter % 20 == 0:
-                self._remove_old_partitions()
-
-            self.main_event_loop_iter += 1
+    def clean(self):
+        logger.info('Starting the cleaning thread')
+        while True:
+            self._remove_old_partitions()
+            time.sleep(DELAY_BETWEEN_CLEANINGS)
 
     def _init_datasource(self):
         logger.info('Initializing the datasource on kawa')
@@ -94,13 +99,16 @@ class KywyConsumer:
                 time.sleep(retry_in)
 
     def _remove_old_partitions(self):
-        cutoff_date = (datetime.today() - timedelta(days=RETENTION_IN_DAYS)).date()
-        logger.info(f'Will remove everything before {cutoff_date}')
-        self._kawa.commands.delete_data(
-            datasource=self._datasource_id,
-            delete_where=[
-                K.where('date').date_range(to_inclusive=cutoff_date)
-            ])
+        try:
+            cutoff_date = (datetime.today() - timedelta(days=RETENTION_IN_DAYS)).date()
+            logger.info(f'Will remove everything before {cutoff_date}')
+            self._kawa.commands.delete_data(
+                datasource=self._datasource_id,
+                delete_where=[
+                    K.where('date').date_range(to_inclusive=cutoff_date)
+                ])
+        except Exception as e:
+            logger.error(f'Issue while cleaning the data: {e}')
 
     @staticmethod
     def _build_arrow_tables(records):

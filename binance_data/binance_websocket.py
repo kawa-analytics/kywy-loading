@@ -1,4 +1,6 @@
 import queue
+from typing import List
+
 import websocket
 import json
 import time
@@ -11,6 +13,7 @@ from logging_config import get_logger
 logger = get_logger(__name__)
 
 AUTOMATICALLY_RECONNECTS_EVERY_S = 60 * 60
+MAX_SYMBOLS_PER_WEBSOCKET = 300
 
 SYMBOL_BLACKLIST = [
     "AGIXUSDT",
@@ -65,68 +68,89 @@ class BinanceWebSocketClient:
                  binance_client):
         self._queue = queue.Queue()
         self._binance_client = binance_client
-        self._ws = None
+        self._websockets: List[websocket.WebSocketApp] = []
+        self.renewing_websockets: bool = False
 
     def start(self):
-        # Connect - and automatic close and reconnect loop
+        #  Connect - and automatic close and reconnect loop
         while True:
-            self._init_websocket()
-            websocket_thread = threading.Thread(
-                target=self._connect_ws,
-                name="binance_websocket",
-                daemon=True
-            )
-            websocket_thread.start()
-            logger.info(f"Will renew the connection in {AUTOMATICALLY_RECONNECTS_EVERY_S}s")
-            time.sleep(AUTOMATICALLY_RECONNECTS_EVERY_S)
-            self._ws.close()
-            self._ws = None
-            websocket_thread.join()
+            self.renewing_websockets = False
+            self._init_websockets()
+            ws_threads: List[threading.Thread] = []
+            for i, ws in enumerate(self._websockets):
+                websocket_thread = threading.Thread(
+                    target=self._connect_ws,
+                    args=(ws, i),
+                    name=f'binance_websocket_{i}',
+                    daemon=True
+                )
+                websocket_thread.start()
+                ws_threads.append(websocket_thread)
 
-    def _connect_ws(self):
-        logger.info('Starting the websocket client')
-        while self._ws:
+            logger.info(f"Will renew the {len(ws_threads)} connections in {AUTOMATICALLY_RECONNECTS_EVERY_S}s")
+            time.sleep(AUTOMATICALLY_RECONNECTS_EVERY_S)
+            while self.is_time_around_minute():
+                logger.info('We are waiting to renew the connections to not be around a potential event')
+                time.sleep(2)
+            logger.info(f'Now renewing the {len(ws_threads)} connections')
+            self.renewing_websockets = True
+            for ws in self._websockets:
+                ws.close()
+            self._websockets = []
+            for thread in ws_threads:
+                thread.join()
+
+    def _connect_ws(self, ws: websocket.WebSocketApp, websocket_id: int):
+        logger.info(f'Starting the websocket client {websocket_id}')
+        while ws:
             try:
-                self._ws.run_forever(
+                ws.run_forever(
                     ping_interval=10,
                     ping_timeout=5,
                     sslopt={"cert_reqs": ssl.CERT_NONE},
                 )
             except Exception as e:
-                logger.error("Connection error:", e)
-
+                logger.error(f'Connection error in client {websocket_id}:', e)
             time.sleep(1)
-            if self._ws:
-                print("Reconnecting in 1 second...")
+            if not self.renewing_websockets:
+                logger.info(f'Reconnecting in 1 second client {websocket_id}...')
+            else:
+                break
 
-        print('End of main WS thread')
+        logger.info(f'End of main WS thread {websocket_id}')
 
     def queue(self) -> queue.Queue:
         return self._queue
 
-    def _load_symbols(self):
+    def _load_symbols(self) -> List[str]:
         logger.info('Loading symbols')
         exchange_info = self._binance_client.futures_exchange_info()
         symbols = []
         for symbol in exchange_info.get('symbols'):
-            if symbol['quoteAsset'] == 'USDT' and symbol['contractType'] == 'PERPETUAL' and symbol['symbol'] not in SYMBOL_BLACKLIST:
+            quote_asset_usdt = symbol['quoteAsset'] == 'USDT'
+            perpetual = symbol['contractType'] == 'PERPETUAL'
+            not_in_blacklist = symbol['symbol'] not in SYMBOL_BLACKLIST
+            if quote_asset_usdt and perpetual and not_in_blacklist:
                 symbols.append(symbol['symbol'])
         logger.info('{} Symbols were found'.format(len(symbols)))
-        return symbols[:400]
+        return symbols
 
-    def _init_websocket(self):
-        logger.info('Initializing the websocket')
+    def _init_websockets(self):
+        logger.info('Initializing the websockets')
         symbols = self._load_symbols()
         logger.info(f'There are {len(symbols)} symbols to load')
+        self._websockets = [self._build_websocket(symbols_chunk)
+                            for symbols_chunk in self.chunk_list(symbols, MAX_SYMBOLS_PER_WEBSOCKET)]
+
+    def _build_websocket(self, symbols: List[str]) -> websocket.WebSocketApp:
+        logger.info(f'Building websocket for {len(symbols)} symbols')
         streams = '/'.join([f'{s.lower()}_perpetual@continuousKline_1m' for s in symbols])
         ws_url = f'wss://fstream.binance.com/ws/{streams}'
-        logger.debug(f'Here is the WS url: {ws_url}')
-        logger.debug(f'The WS url is {ws_url}')
-        self._ws = websocket.WebSocketApp(ws_url,
-                                          on_open=self._on_open,
-                                          on_message=self._on_message,
-                                          on_error=self._on_error,
-                                          on_close=self._on_close)
+        return websocket.WebSocketApp(ws_url,
+                                      on_open=self._on_open,
+                                      on_message=self._on_message,
+                                      on_error=self._on_error,
+                                      on_close=self._on_close)
 
     def _on_message(self, ws, json_message):
         try:
@@ -175,3 +199,12 @@ class BinanceWebSocketClient:
     @staticmethod
     def _on_close(ws, close_status_code, close_msg):
         logger.info(f"WebSocket closed: {close_status_code} - {close_msg}")
+
+    @staticmethod
+    def chunk_list(lst: List[str], chunk_size=200) -> List[List[str]]:
+        return [lst[i:i + chunk_size] for i in range(0, len(lst), chunk_size)]
+
+    @staticmethod
+    def is_time_around_minute():
+        now_seconds = datetime.now().second
+        return now_seconds > 45 or now_seconds < 10
