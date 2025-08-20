@@ -6,10 +6,10 @@ import json
 import time
 import threading
 import ssl
+import binance
 
 from datetime import datetime
 from logging_config import get_logger
-
 logger = get_logger(__name__)
 
 AUTOMATICALLY_RECONNECTS_EVERY_S = 60 * 60
@@ -70,6 +70,7 @@ class BinanceWebSocketClient:
         self._binance_client = binance_client
         self._websockets: List[websocket.WebSocketApp] = []
         self.renewing_websockets: bool = False
+        self.symbols = []
 
     def start(self):
         #  Connect - and automatic close and reconnect loop
@@ -86,7 +87,6 @@ class BinanceWebSocketClient:
                 )
                 websocket_thread.start()
                 ws_threads.append(websocket_thread)
-
             logger.info(f"Will renew the {len(ws_threads)} connections in {AUTOMATICALLY_RECONNECTS_EVERY_S}s")
             time.sleep(AUTOMATICALLY_RECONNECTS_EVERY_S)
             while self.is_time_around_minute():
@@ -137,10 +137,29 @@ class BinanceWebSocketClient:
 
     def _init_websockets(self):
         logger.info('Initializing the websockets')
-        symbols = self._load_symbols()
-        logger.info(f'There are {len(symbols)} symbols to load')
+
+        for i in range(5):
+            try:
+                self._load_symbols_or_use_previously_loaded_ones()
+                continue
+            except Exception as e:
+                logger.warning(f'Issue when loading the symbols, try {i}/5: with error {e}')
+
+        if not self.symbols:
+            raise Exception('Could not load the symbols, stopping')
+
+        logger.info(f'There are {len(self.symbols)} symbols to load')
         self._websockets = [self._build_websocket(symbols_chunk)
-                            for symbols_chunk in self.chunk_list(symbols, MAX_SYMBOLS_PER_WEBSOCKET)]
+                            for symbols_chunk in self.chunk_list(self.symbols, MAX_SYMBOLS_PER_WEBSOCKET)]
+
+    def _load_symbols_or_use_previously_loaded_ones(self):
+        try:
+            self.symbols = self._load_symbols()
+        except Exception as e:
+            if self.symbols:
+                logger.warning(f'Issue when loading the symbols, using previously loaded symbols: {e}')
+            else:
+                raise e
 
     def _build_websocket(self, symbols: List[str]) -> websocket.WebSocketApp:
         logger.info(f'Building websocket for {len(symbols)} symbols')
