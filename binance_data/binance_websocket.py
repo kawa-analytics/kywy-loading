@@ -1,5 +1,6 @@
+import dataclasses
 import queue
-from typing import List
+from typing import List, Optional
 
 import websocket
 import json
@@ -10,10 +11,11 @@ import binance
 
 from datetime import datetime
 from logging_config import get_logger
+
 logger = get_logger(__name__)
 
 AUTOMATICALLY_RECONNECTS_EVERY_S = 60 * 60
-MAX_SYMBOLS_PER_WEBSOCKET = 300
+MAX_SUBJECTS_PER_WEBSOCKET = 300
 
 SYMBOL_BLACKLIST = [
     "AGIXUSDT",
@@ -62,15 +64,32 @@ SYMBOL_BLACKLIST = [
 ]
 
 
+@dataclasses.dataclass
+class SymbolInterval:
+    symbol: str
+    interval: str
+
+
 class BinanceWebSocketClient:
 
     def __init__(self,
-                 binance_client):
+                 binance_client,
+                 live: bool,
+                 candle: Optional[str],
+                 candles: Optional[List[str]]):
         self._queue = queue.Queue()
         self._binance_client = binance_client
         self._websockets: List[websocket.WebSocketApp] = []
         self.renewing_websockets: bool = False
         self.symbols = []
+        self.live: bool = live
+        if (candle and candles) or (not candle and not candles):
+            raise Exception('Websocket should define a single or a list of candles not both')
+        if candle:
+            logger.info(f'Websocket will listen to {candle} candle')
+        if candles:
+            logger.info(f'Websocket will listen to {candles} candles')
+        self.candle_intervals = [candle] if candle else candles
 
     def start(self):
         #  Connect - and automatic close and reconnect loop
@@ -149,8 +168,13 @@ class BinanceWebSocketClient:
             raise Exception('Could not load the symbols, stopping')
 
         logger.info(f'There are {len(self.symbols)} symbols to load')
-        self._websockets = [self._build_websocket(symbols_chunk)
-                            for symbols_chunk in self.chunk_list(self.symbols, MAX_SYMBOLS_PER_WEBSOCKET)]
+        symbol_interval_tuples = [SymbolInterval(symbol, interval)
+                                  for symbol in self.symbols
+                                  for interval in self.candle_intervals]
+
+        self._websockets = [self._build_websocket(symbol_interval_tuples_chunk)
+                            for symbol_interval_tuples_chunk in
+                            self.chunk_list(symbol_interval_tuples, MAX_SUBJECTS_PER_WEBSOCKET)]
 
     def _load_symbols_or_use_previously_loaded_ones(self):
         try:
@@ -161,9 +185,10 @@ class BinanceWebSocketClient:
             else:
                 raise e
 
-    def _build_websocket(self, symbols: List[str]) -> websocket.WebSocketApp:
-        logger.info(f'Building websocket for {len(symbols)} symbols')
-        streams = '/'.join([f'{s.lower()}_perpetual@continuousKline_1m' for s in symbols])
+    def _build_websocket(self, symbol_intervals: List[SymbolInterval]) -> websocket.WebSocketApp:
+        logger.info(f'Building websocket for {len(symbol_intervals)} symbol_intervals')
+        streams = '/'.join([f'{s.symbol.lower()}_perpetual@continuousKline_{s.interval}'
+                            for s in symbol_intervals])
         ws_url = f'wss://fstream.binance.com/ws/{streams}'
         return websocket.WebSocketApp(ws_url,
                                       on_open=self._on_open,
@@ -179,7 +204,7 @@ class BinanceWebSocketClient:
             contract = message['ct']
             timestamp = message['E']
             is_candle_closed = candle['x']
-            if is_candle_closed:
+            if is_candle_closed or self.live:
                 logger.debug(f'Appending a message in the queue for symbol={symbol}')
                 event_ts = datetime.fromtimestamp(timestamp / 1000)
                 self._queue.put({
@@ -220,7 +245,7 @@ class BinanceWebSocketClient:
         logger.info(f"WebSocket closed: {close_status_code} - {close_msg}")
 
     @staticmethod
-    def chunk_list(lst: List[str], chunk_size=200) -> List[List[str]]:
+    def chunk_list(lst: List, chunk_size=200) -> List[List]:
         return [lst[i:i + chunk_size] for i in range(0, len(lst), chunk_size)]
 
     @staticmethod

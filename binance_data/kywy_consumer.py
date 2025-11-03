@@ -18,11 +18,13 @@ class KywyConsumer:
 
     def __init__(self,
                  data_queue: queue.Queue,
-                 datasource_name: str):
+                 datasource_name: str,
+                 live: bool = False):
         self._queue = data_queue
         self._datasource_name = datasource_name
         self._datasource_id = None
         self._kawa = K.load_client_from_environment()
+        self.live = live
 
     def start(self):
         self._init_datasource()
@@ -42,7 +44,7 @@ class KywyConsumer:
     def run(self):
         logger.info('Starting the consumer thread')
         while True:
-            time.sleep(DELAY_BETWEEN_TWO_ITERATIONS)
+            time.sleep(1 if self.live else DELAY_BETWEEN_TWO_ITERATIONS)
             logger.debug('Will process the queue')
             self._process_queue()
 
@@ -59,15 +61,28 @@ class KywyConsumer:
             datasource_name=self._datasource_name,
             arrow_table=arrow_table
         )
-        created_datasource = loader.create_datasource()
+        primary_keys = []
+        if self.live:
+            primary_keys = ['interval', 'symbol']
+
+        created_datasource = loader.create_datasource(primary_keys)
         self._datasource_id = created_datasource['id']
 
         # Partition by date to allow proper retention policy
-        self._kawa.commands.replace_datasource_primary_keys(
-            datasource=self._datasource_id,
-            new_primary_keys=['date', 'record_id'],
-            partition_key='date',
-        )
+        if self.live:
+            pass
+            # self._kawa.commands.replace_datasource_primary_keys(
+            #     datasource=self._datasource_id,
+            #     new_primary_keys=['symbol', 'timestamp'],
+            #     partition_key='timestamp',
+            #     partition_sampler='TEN_MINUTES'
+            # )
+        else:
+            self._kawa.commands.replace_datasource_primary_keys(
+                datasource=self._datasource_id,
+                new_primary_keys=['date', 'record_id'],
+                partition_key='date',
+            )
 
     def _process_queue(self):
         records = []
@@ -99,6 +114,12 @@ class KywyConsumer:
                 time.sleep(retry_in)
 
     def _remove_old_partitions(self):
+        if self.live:
+            pass
+        else:
+            self._remove_old_partitions_non_live()
+
+    def _remove_old_partitions_non_live(self):
         try:
             cutoff_date = (datetime.today() - timedelta(days=RETENTION_IN_DAYS)).date()
             logger.info(f'Will remove everything before {cutoff_date}')
