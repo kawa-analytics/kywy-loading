@@ -43,10 +43,21 @@ class KywyConsumer:
 
     def run(self):
         logger.info('Starting the consumer thread')
+        last_update = time.time()
         while True:
-            time.sleep(1 if self.live else DELAY_BETWEEN_TWO_ITERATIONS)
-            logger.debug('Will process the queue')
-            self._process_queue()
+            time.sleep(0.2)
+            if self.should_process_queue(last_update):
+                logger.debug('Will process the queue')
+                self._process_queue()
+                last_update = time.time()
+
+    def should_process_queue(self, last_update: time.time):
+        if self.live:
+            return time.time() - last_update > 1
+        delay_has_been_reached = time.time() - last_update > DELAY_BETWEEN_TWO_ITERATIONS
+        is_not_in_first_second = datetime.now().second > 0
+        is_at_right_second = 0 < datetime.now().second < 2
+        return (delay_has_been_reached and is_not_in_first_second) or is_at_right_second
 
     def clean(self):
         logger.info('Starting the cleaning thread')
