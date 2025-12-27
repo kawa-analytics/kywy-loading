@@ -1,9 +1,13 @@
+import dataclasses
 import queue
+from typing import List, Optional
+
 import websocket
 import json
 import time
 import threading
 import ssl
+import binance
 
 from datetime import datetime
 from logging_config import get_logger
@@ -11,6 +15,7 @@ from logging_config import get_logger
 logger = get_logger(__name__)
 
 AUTOMATICALLY_RECONNECTS_EVERY_S = 60 * 60
+MAX_SUBJECTS_PER_WEBSOCKET = 300
 
 SYMBOL_BLACKLIST = [
     "AGIXUSDT",
@@ -59,74 +64,137 @@ SYMBOL_BLACKLIST = [
 ]
 
 
+@dataclasses.dataclass
+class SymbolInterval:
+    symbol: str
+    interval: str
+
+
 class BinanceWebSocketClient:
 
     def __init__(self,
-                 binance_client):
+                 binance_client,
+                 live: bool,
+                 candle: Optional[str],
+                 candles: Optional[List[str]]):
         self._queue = queue.Queue()
         self._binance_client = binance_client
-        self._ws = None
+        self._websockets: List[websocket.WebSocketApp] = []
+        self.renewing_websockets: bool = False
+        self.symbols = []
+        self.live: bool = live
+        if (candle and candles) or (not candle and not candles):
+            raise Exception('Websocket should define a single or a list of candles not both')
+        if candle:
+            logger.info(f'Websocket will listen to {candle} candle')
+        if candles:
+            logger.info(f'Websocket will listen to {candles} candles')
+        self.candle_intervals = [candle] if candle else candles
 
     def start(self):
-        # Connect - and automatic close and reconnect loop
+        #  Connect - and automatic close and reconnect loop
         while True:
-            self._init_websocket()
-            websocket_thread = threading.Thread(
-                target=self._connect_ws,
-                name="binance_websocket",
-                daemon=True
-            )
-            websocket_thread.start()
-            logger.info(f"Will renew the connection in {AUTOMATICALLY_RECONNECTS_EVERY_S}s")
+            self.renewing_websockets = False
+            self._init_websockets()
+            ws_threads: List[threading.Thread] = []
+            for i, ws in enumerate(self._websockets):
+                websocket_thread = threading.Thread(
+                    target=self._connect_ws,
+                    args=(ws, i),
+                    name=f'binance_websocket_{i}',
+                    daemon=True
+                )
+                websocket_thread.start()
+                ws_threads.append(websocket_thread)
+            logger.info(f"Will renew the {len(ws_threads)} connections in {AUTOMATICALLY_RECONNECTS_EVERY_S}s")
             time.sleep(AUTOMATICALLY_RECONNECTS_EVERY_S)
-            self._ws.close()
-            self._ws = None
-            websocket_thread.join()
+            while self.is_time_around_minute():
+                logger.info('We are waiting to renew the connections to not be around a potential event')
+                time.sleep(2)
+            logger.info(f'Now renewing the {len(ws_threads)} connections')
+            self.renewing_websockets = True
+            for ws in self._websockets:
+                ws.close()
+            self._websockets = []
+            for thread in ws_threads:
+                thread.join()
 
-    def _connect_ws(self):
-        logger.info('Starting the websocket client')
-        while self._ws:
+    def _connect_ws(self, ws: websocket.WebSocketApp, websocket_id: int):
+        logger.info(f'Starting the websocket client {websocket_id}')
+        while ws:
             try:
-                self._ws.run_forever(
+                ws.run_forever(
                     ping_interval=10,
                     ping_timeout=5,
                     sslopt={"cert_reqs": ssl.CERT_NONE},
                 )
             except Exception as e:
-                logger.error("Connection error:", e)
-
+                logger.error(f'Connection error in client {websocket_id}:', e)
             time.sleep(1)
-            if self._ws:
-                print("Reconnecting in 1 second...")
+            if not self.renewing_websockets:
+                logger.info(f'Reconnecting in 1 second client {websocket_id}...')
+            else:
+                break
 
-        print('End of main WS thread')
+        logger.info(f'End of main WS thread {websocket_id}')
 
     def queue(self) -> queue.Queue:
         return self._queue
 
-    def _load_symbols(self):
+    def _load_symbols(self) -> List[str]:
         logger.info('Loading symbols')
         exchange_info = self._binance_client.futures_exchange_info()
         symbols = []
         for symbol in exchange_info.get('symbols'):
-            if symbol['quoteAsset'] == 'USDT' and symbol['contractType'] == 'PERPETUAL' and symbol['symbol'] not in SYMBOL_BLACKLIST:
+            quote_asset_usdt = symbol['quoteAsset'] == 'USDT'
+            perpetual = symbol['contractType'] == 'PERPETUAL'
+            not_in_blacklist = symbol['symbol'] not in SYMBOL_BLACKLIST
+            if quote_asset_usdt and perpetual and not_in_blacklist:
                 symbols.append(symbol['symbol'])
         logger.info('{} Symbols were found'.format(len(symbols)))
-        return symbols[:400]
+        return symbols
 
-    def _init_websocket(self):
-        logger.info('Initializing the websocket')
-        symbols = self._load_symbols()
-        logger.info(f'There are {len(symbols)} symbols to load')
-        streams = '/'.join([f'{s.lower()}_perpetual@continuousKline_1m' for s in symbols])
+    def _init_websockets(self):
+        logger.info('Initializing the websockets')
+
+        for i in range(5):
+            try:
+                self._load_symbols_or_use_previously_loaded_ones()
+                continue
+            except Exception as e:
+                logger.warning(f'Issue when loading the symbols, try {i}/5: with error {e}')
+
+        if not self.symbols:
+            raise Exception('Could not load the symbols, stopping')
+
+        logger.info(f'There are {len(self.symbols)} symbols to load')
+        symbol_interval_tuples = [SymbolInterval(symbol, interval)
+                                  for symbol in self.symbols
+                                  for interval in self.candle_intervals]
+
+        self._websockets = [self._build_websocket(symbol_interval_tuples_chunk)
+                            for symbol_interval_tuples_chunk in
+                            self.chunk_list(symbol_interval_tuples, MAX_SUBJECTS_PER_WEBSOCKET)]
+
+    def _load_symbols_or_use_previously_loaded_ones(self):
+        try:
+            self.symbols = self._load_symbols()
+        except Exception as e:
+            if self.symbols:
+                logger.warning(f'Issue when loading the symbols, using previously loaded symbols: {e}')
+            else:
+                raise e
+
+    def _build_websocket(self, symbol_intervals: List[SymbolInterval]) -> websocket.WebSocketApp:
+        logger.info(f'Building websocket for {len(symbol_intervals)} symbol_intervals')
+        streams = '/'.join([f'{s.symbol.lower()}_perpetual@continuousKline_{s.interval}'
+                            for s in symbol_intervals])
         ws_url = f'wss://fstream.binance.com/ws/{streams}'
-        logger.debug(f'Here is the WS url: {ws_url}')
-        logger.debug(f'The WS url is {ws_url}')
-        self._ws = websocket.WebSocketApp(ws_url,
-                                          on_open=self._on_open,
-                                          on_message=self._on_message,
-                                          on_error=self._on_error,
-                                          on_close=self._on_close)
+        return websocket.WebSocketApp(ws_url,
+                                      on_open=self._on_open,
+                                      on_message=self._on_message,
+                                      on_error=self._on_error,
+                                      on_close=self._on_close)
 
     def _on_message(self, ws, json_message):
         try:
@@ -136,7 +204,7 @@ class BinanceWebSocketClient:
             contract = message['ct']
             timestamp = message['E']
             is_candle_closed = candle['x']
-            if is_candle_closed:
+            if is_candle_closed or self.live:
                 logger.debug(f'Appending a message in the queue for symbol={symbol}')
                 event_ts = datetime.fromtimestamp(timestamp / 1000)
                 self._queue.put({
@@ -175,3 +243,12 @@ class BinanceWebSocketClient:
     @staticmethod
     def _on_close(ws, close_status_code, close_msg):
         logger.info(f"WebSocket closed: {close_status_code} - {close_msg}")
+
+    @staticmethod
+    def chunk_list(lst: List, chunk_size=200) -> List[List]:
+        return [lst[i:i + chunk_size] for i in range(0, len(lst), chunk_size)]
+
+    @staticmethod
+    def is_time_around_minute():
+        now_seconds = datetime.now().second
+        return now_seconds > 45 or now_seconds < 10

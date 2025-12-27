@@ -11,41 +11,59 @@ logger = get_logger(__name__)
 
 RETENTION_IN_DAYS = 7
 DELAY_BETWEEN_TWO_ITERATIONS = 5
+DELAY_BETWEEN_CLEANINGS = 20 * 60
 
 
 class KywyConsumer:
 
     def __init__(self,
                  data_queue: queue.Queue,
-                 datasource_name: str):
+                 datasource_name: str,
+                 live: bool = False):
         self._queue = data_queue
         self._datasource_name = datasource_name
         self._datasource_id = None
         self._kawa = K.load_client_from_environment()
-        self.main_event_loop_iter = 0
+        self.live = live
 
     def start(self):
+        self._init_datasource()
         consumer_thread = threading.Thread(
             target=self.run,
             name="kawa_appender",
             daemon=True
         )
         consumer_thread.start()
+        cleaning_thread = threading.Thread(
+            target=self.clean,
+            name="kawa_cleaner",
+            daemon=True
+        )
+        cleaning_thread.start()
 
     def run(self):
-        self._init_datasource()
-        logger.info('Starting the consumer')
-
-        # Main event loop
+        logger.info('Starting the consumer thread')
+        last_update = time.time()
         while True:
-            time.sleep(DELAY_BETWEEN_TWO_ITERATIONS)
-            logger.debug('Will process the queue')
-            self._process_queue()
+            time.sleep(0.2)
+            if self.should_process_queue(last_update):
+                logger.debug('Will process the queue')
+                self._process_queue()
+                last_update = time.time()
 
-            if self.main_event_loop_iter % 20 == 0:
-                self._remove_old_partitions()
+    def should_process_queue(self, last_update: time.time):
+        if self.live:
+            return time.time() - last_update > 1
+        delay_has_been_reached = time.time() - last_update > DELAY_BETWEEN_TWO_ITERATIONS
+        is_not_in_first_second = datetime.now().second > 0
+        is_at_right_second = 0 < datetime.now().second < 2
+        return (delay_has_been_reached and is_not_in_first_second) or is_at_right_second
 
-            self.main_event_loop_iter += 1
+    def clean(self):
+        logger.info('Starting the cleaning thread')
+        while True:
+            self._remove_old_partitions()
+            time.sleep(DELAY_BETWEEN_CLEANINGS)
 
     def _init_datasource(self):
         logger.info('Initializing the datasource on kawa')
@@ -54,15 +72,28 @@ class KywyConsumer:
             datasource_name=self._datasource_name,
             arrow_table=arrow_table
         )
-        created_datasource = loader.create_datasource()
+        primary_keys = []
+        if self.live:
+            primary_keys = ['interval', 'symbol']
+
+        created_datasource = loader.create_datasource(primary_keys)
         self._datasource_id = created_datasource['id']
 
         # Partition by date to allow proper retention policy
-        self._kawa.commands.replace_datasource_primary_keys(
-            datasource=self._datasource_id,
-            new_primary_keys=['date', 'record_id'],
-            partition_key='date',
-        )
+        if self.live:
+            pass
+            # self._kawa.commands.replace_datasource_primary_keys(
+            #     datasource=self._datasource_id,
+            #     new_primary_keys=['symbol', 'timestamp'],
+            #     partition_key='timestamp',
+            #     partition_sampler='TEN_MINUTES'
+            # )
+        else:
+            self._kawa.commands.replace_datasource_primary_keys(
+                datasource=self._datasource_id,
+                new_primary_keys=['date', 'record_id'],
+                partition_key='date',
+            )
 
     def _process_queue(self):
         records = []
@@ -94,13 +125,22 @@ class KywyConsumer:
                 time.sleep(retry_in)
 
     def _remove_old_partitions(self):
-        cutoff_date = (datetime.today() - timedelta(days=RETENTION_IN_DAYS)).date()
-        logger.info(f'Will remove everything before {cutoff_date}')
-        self._kawa.commands.delete_data(
-            datasource=self._datasource_id,
-            delete_where=[
-                K.where('date').date_range(to_inclusive=cutoff_date)
-            ])
+        if self.live:
+            pass
+        else:
+            self._remove_old_partitions_non_live()
+
+    def _remove_old_partitions_non_live(self):
+        try:
+            cutoff_date = (datetime.today() - timedelta(days=RETENTION_IN_DAYS)).date()
+            logger.info(f'Will remove everything before {cutoff_date}')
+            self._kawa.commands.delete_data(
+                datasource=self._datasource_id,
+                delete_where=[
+                    K.where('date').date_range(to_inclusive=cutoff_date)
+                ])
+        except Exception as e:
+            logger.error(f'Issue while cleaning the data: {e}')
 
     @staticmethod
     def _build_arrow_tables(records):
